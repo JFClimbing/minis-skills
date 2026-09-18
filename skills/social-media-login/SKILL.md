@@ -1,9 +1,33 @@
 ---
 name: social-media-login
-description: 自动登录抖音/小红书创作者中心，抓取后台数据（播放、点赞、评论、收藏、分享、划走率等），用于内容分析和运营决策。触发词：登录抖音、登录小红书、查看后台数据、抓取数据、分析账号。
+description: 自动登录抖音/小红书创作者中心，抓取后台数据（播放、点赞、评论、收藏、分享、划走率等），用于内容分析和运营决策。支持 Windows / macOS / Linux / Minis。触发词：登录抖音、登录小红书、查看后台数据、抓取数据、分析账号。
 ---
 
-# 社交媒体后台数据抓取
+# 社交媒体后台数据抓取（跨平台）
+
+## 支持平台
+
+| 平台 | 浏览器工具 | 说明 |
+|------|-----------|------|
+| Minis/iSH | `minis-browser-use` | Minis 内置浏览器工具 |
+| macOS | `safaridriver` / `playwright` | 可选 Safari 或 Playwright |
+| Linux | `chromium` / `playwright` | 需要 Chromium + Playwright |
+| Windows | `msedge` / `playwright` | 可选 Edge 或 Playwright |
+| WSL | `playwright` (headless) | 推荐 Playwright headless 模式 |
+
+### 安装 Playwright（跨平台推荐）
+```bash
+# macOS / Linux
+pip3 install playwright
+playwright install chromium
+
+# Windows
+pip install playwright
+playwright install chromium
+
+# Minis/iSH（如需要）
+pip3 install playwright
+```
 
 ## 核心流程
 
@@ -22,7 +46,9 @@ description: 自动登录抖音/小红书创作者中心，抓取后台数据（
 
 **OCR处理**：
 - 封面图在创作者中心是 background-image（class `video-card-cover-*`），不是 `<img>`
-- 用 `apple-vision ocr <img> --lang zh-Hans --level accurate`
+- macOS: `apple-vision ocr <img> --lang zh-Hans --level accurate`
+- Windows: 可使用 Tesseract OCR 或在线 OCR API
+- Linux: `tesseract <img> chi_sim -l chi_sim`
 
 ### 2. 小红书创作者中心
 
@@ -80,16 +106,9 @@ description: 自动登录抖音/小红书创作者中心，抓取后台数据（
 - **发布时间**：不同时段的播放量差异
 - **划走率**：哪些内容划走率高，分析原因
 
-## 注意事项
+## 平台特定命令
 
-- 登录过程需要用户手动输入验证码、扫码等
-- 抖音登录态会过期（约几小时后）
-- 小红书笔记正文图片抓取需要 xsec_token（创作中心不提供）
-- 公开页 `explore` 若无 token → 走创作中心
-- 所有数据落盘到 `samples/<平台>-<账号名>/`
-
-## 常用命令
-
+### Minis/iSH
 ```bash
 # 打开抖音创作者中心
 minis-browser-use navigate --url https://creator.douyin.com/creator-micro/content/manage
@@ -99,4 +118,93 @@ minis-browser-use navigate --url https://creator.xiaohongshu.com/login
 
 # OCR 图片
 apple-vision ocr <image_path> --lang zh-Hans --level accurate
+```
+
+### macOS
+```bash
+# 打开抖音创作者中心（使用 Safari）
+open "https://creator.douyin.com/creator-micro/content/manage"
+
+# 使用 Playwright 抓取
+python3 -c "
+from playwright.sync_api import sync_playwright
+with sync_playwright() as p:
+    browser = p.chromium.launch(headless=False)
+    page = browser.new_page()
+    page.goto('https://creator.douyin.com/creator-micro/content/manage')
+    # ... 抓取逻辑
+"
+
+# OCR 图片
+apple-vision ocr <image_path> --lang zh-Hans --level accurate
+```
+
+### Windows
+```powershell
+# 打开抖音创作者中心
+Start-Process "https://creator.douyin.com/creator-micro/content/manage"
+
+# 使用 Playwright 抓取
+python -c "
+from playwright.sync_api import sync_playwright
+with sync_playwright() as p:
+    browser = p.chromium.launch(headless=False)
+    page = browser.new_page()
+    page.goto('https://creator.douyin.com/creator-micro/content/manage')
+    # ... 抓取逻辑
+"
+
+# OCR 图片（需要安装 Tesseract）
+tesseract <image_path> stdout -l chi_sim
+```
+
+### Linux
+```bash
+# 打开抖音创作者中心
+xdg-open "https://creator.douyin.com/creator-micro/content/manage"
+
+# 使用 Playwright 抓取
+python3 -c "
+from playwright.sync_api import sync_playwright
+with sync_playwright() as p:
+    browser = p.chromium.launch(headless=True)
+    page = browser.new_page()
+    page.goto('https://creator.douyin.com/creator-micro/content/manage')
+    # ... 抓取逻辑
+"
+
+# OCR 图片
+tesseract <image_path> stdout -l chi_sim
+```
+
+## 注意事项
+
+- 登录过程需要用户手动输入验证码、扫码等
+- 抖音登录态会过期（约几小时后）
+- 小红书笔记正文图片抓取需要 xsec_token（创作中心不提供）
+- 公开页 `explore` 若无 token → 走创作中心
+- 所有数据落盘到 `samples/<平台>-<账号名>/`
+
+## 数据保存路径
+
+| 平台 | 路径 |
+|------|------|
+| Minis/iSH | `/var/minis/skills/samples/` |
+| macOS/Linux | `~/.minis/skills/samples/` |
+| Windows | `%USERPROFILE%\.minis\skills\samples\` |
+
+## 常见问题
+
+### Q: 验证码收不到？
+A: 第一次失败、第二次成功是常见现象。等待倒计时结束后重试。
+
+### Q: 登录态过期了？
+A: 抖音登录态约几小时后过期，需要重新登录。
+
+### Q: Windows 上 Playwright 安装失败？
+A: 确保已安装 Python 3.7+，然后运行：
+```powershell
+pip install --upgrade pip
+pip install playwright
+playwright install chromium
 ```

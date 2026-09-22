@@ -3,17 +3,26 @@
 
 用法：
   python3 rz.py <文件名或路径> [...]
-  python3 rz.py --all-known          # 压缩名单里所有已存在的文件
+  python3 rz.py --all-known          # 压缩工作目录下所有图片
   python3 rz.py --check <名称...>     # 只看大小，不改
   python3 rz.py --dir <目录路径>       # 指定工作目录
 
 说明：
   自动检测平台和附件目录。已小于 400KB 的自动跳过。
-  同一个文件重复压不会变差。
+  只有压缩后更小才会替换原图，否则保留原图（不会劣化、不会残留副本）。
 """
 import os
 import sys
+import tempfile
 import platform
+
+# Windows 默认控制台编码是 GBK，遇到 emoji 会抛 UnicodeEncodeError 崩溃；
+# 统一把 stdout/stderr 转成 UTF-8，保证中文和 emoji 都能正常输出。
+for _s in (sys.stdout, sys.stderr):
+    try:
+        _s.reconfigure(encoding="utf-8", errors="replace")
+    except (AttributeError, ValueError, OSError):
+        pass
 
 try:
     from PIL import Image
@@ -38,29 +47,32 @@ def get_default_upload_dir():
     elif system == "Darwin":  # macOS
         return os.path.join(home, ".minis", "attachments", "uploads")
 
-    elif system == "Windows":
-        # 优先使用 APPDATA，回退到用户目录
-        appdata = os.environ.get("APPDATA", home)
-        return os.path.join(home, ".minis", "attachments", "uploads")
-
-    else:
-        return os.path.join(home, ".minis", "attachments", "uploads")
+    # Windows 及其它系统：统一使用用户目录下的 .minis 附件目录
+    return os.path.join(home, ".minis", "attachments", "uploads")
 
 
 DEFAULT_DIR = get_default_upload_dir()
 MAX_PX = 1200
 SKIP_BELOW = 400 * 1024  # 已经很小了就不动
 
-# 历史名单（--all-known 时用）
-KNOWN = [
-    "photo_06550D0B", "photo_C9C2C2CF", "photo_CF55BFB5", "photo_9DD88B8B",
-    "photo_666BCC8C", "photo_C2A1D110", "photo_D89E20EF", "photo_DD7F6CC1",
-    "photo_34EF7B1F", "photo_EDFFBE6C", "photo_A5D6C486", "photo_CC9767CE",
-    "photo_DCCEE1F8", "photo_5E624093", "photo_BB696DEC", "photo_D43A0158",
-    "photo_AFBE4B5F", "photo_CE65AD10", "photo_CB0B9ECC", "photo_DE9C52F6",
-    "photo_DC3C4751", "photo_89A80389", "photo_9D8B7B04", "photo_9419CDFC",
-    "photo_1CE1A069",
-]
+IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".webp", ".heic", ".avif"}
+
+
+def find_images(directory):
+    """列出目录下所有图片文件的绝对路径（按文件名排序）"""
+    result = []
+    try:
+        for name in sorted(os.listdir(directory)):
+            if os.path.splitext(name)[1].lower() in IMAGE_EXTS:
+                result.append(os.path.join(directory, name))
+    except OSError:
+        pass
+    return result
+
+
+def is_same_file(a, b):
+    """判断两个路径是否指向同一文件（兼容大小写不敏感的文件系统，如 Windows）"""
+    return os.path.normcase(os.path.normpath(a)) == os.path.normcase(os.path.normpath(b))
 
 
 def resolve(name, work_dir=None):
@@ -98,13 +110,18 @@ def format_size(size_bytes):
 
 
 def compress(p):
-    """压缩单张图片，返回 (原始大小, 新大小, 状态)"""
+    """压缩单张图片，返回 (原始大小, 新大小, 状态)
+
+    状态：ok=已压缩且更小；skip=太小或压缩后未变小（保留原图）；keep=目标文件已存在；error=失败
+    """
     s0 = os.path.getsize(p)
     if s0 < SKIP_BELOW:
         return s0, s0, "skip"
 
+    # 立即完整读入并关闭源文件句柄（Windows 上覆盖原文件前必须释放句柄）
     try:
-        im = Image.open(p)
+        with Image.open(p) as src:
+            im = src.copy()
     except Exception as e:
         return s0, s0, f"error: {e}"
 
@@ -118,16 +135,43 @@ def compress(p):
         r = MAX_PX / max(w, h)
         im = im.resize((max(1, int(w * r)), max(1, int(h * r))), Image.LANCZOS)
 
-    # 保存为 JPEG
+    # 目标路径：统一转为 .jpg（小写）
     newp = os.path.splitext(p)[0] + ".jpg"
-    im.save(newp, "JPEG", quality=72, optimize=True)
+    same = is_same_file(newp, p)
 
-    # 如果新文件更小，替换原文件
-    if newp != p and os.path.exists(newp) and os.path.getsize(newp) < s0:
-        os.remove(p)
+    # 如果目标 .jpg 已存在且是另一个文件，避免误覆盖，跳过
+    if os.path.exists(newp) and not same:
+        return s0, s0, "keep"
 
-    s1 = os.path.getsize(newp)
-    return s0, s1, "ok"
+    # 先写同目录临时文件，再原子替换，避免写出半截文件
+    dirname = os.path.dirname(os.path.abspath(p))
+    try:
+        fd, tmp = tempfile.mkstemp(suffix=".jpg", prefix=".rz-", dir=dirname)
+    except OSError as e:
+        return s0, s0, f"error: {e}"
+
+    try:
+        with os.fdopen(fd, "wb") as f:
+            im.save(f, "JPEG", quality=72, optimize=True)
+
+        s_tmp = os.path.getsize(tmp)
+        if s_tmp >= s0:
+            # 压缩后没变小：丢弃临时文件，保留原图
+            os.remove(tmp)
+            return s0, s0, "skip"
+
+        # 更小才替换原图
+        os.replace(tmp, newp)
+        if not same and os.path.exists(p):
+            os.remove(p)
+        return s0, s_tmp, "ok"
+    except Exception as e:
+        try:
+            if os.path.exists(tmp):
+                os.remove(tmp)
+        except OSError:
+            pass
+        return s0, s0, f"error: {e}"
 
 
 def main():
@@ -153,12 +197,13 @@ def main():
     check_only = "--check" in args
     args = [a for a in args if a != "--check"]
 
-    if args and args[0] == "--all-known":
-        targets = []
-        for n in KNOWN:
-            p = resolve(n, work_dir)
-            if p:
-                targets.append(p)
+    # --all-known：扫描工作目录下所有图片
+    if "--all-known" in args:
+        base = work_dir or DEFAULT_DIR
+        targets = find_images(base)
+        if not targets:
+            print(f"  没有找到图片: {base}")
+            return 1
     else:
         targets = []
         for a in args:
@@ -199,6 +244,8 @@ def main():
 
     for n, s0, s1, st in sorted(rows, key=lambda x: -x[1]):
         tag = "（已小，跳过）" if st == "skip" else ""
+        if st == "keep":
+            tag = "（目标 .jpg 已存在，跳过）"
         if st.startswith("error"):
             tag = f"（{st}）"
         print(f"  {format_size(s0):>10} → {format_size(s1):>10}  {n} {tag}")

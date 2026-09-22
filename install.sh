@@ -142,7 +142,11 @@ REPO_URL="https://github.com/JFClimbing/minis-skills.git"
 if command -v git &>/dev/null; then
     echo "🔍 Cloning skills repository..."
     TMPDIR=$(mktemp -d 2>/dev/null || mktemp -d -t 'minis-skills')
-    git clone --depth 1 "$REPO_URL" "$TMPDIR/temp-skills" 2>/dev/null
+    if ! git clone --depth 1 "$REPO_URL" "$TMPDIR/temp-skills"; then
+        echo "❌ 克隆仓库失败，请检查网络或改用 zip 方式安装"
+        rm -rf "$TMPDIR"
+        exit 1
+    fi
 
     echo "📋 Installing skills..."
     cp -r "$TMPDIR/temp-skills/skills/"* "$SKILLS_DIR/"
@@ -200,10 +204,10 @@ echo ""
 echo "✅ Installation complete!"
 echo ""
 echo "📋 Installed skills:"
-ls -1 "$SKILLS_DIR" 2>/dev/null || dir /b "$SKILLS_DIR" 2>/dev/null
+ls -1 "$SKILLS_DIR" 2>/dev/null
 echo ""
 echo "📜 Installed scripts:"
-ls -1 "$BIN_DIR/rz.py" 2>/dev/null || dir /b "$BIN_DIR\rz.py" 2>/dev/null
+ls -1 "$BIN_DIR/rz.py" 2>/dev/null
 echo ""
 
 case "$PLATFORM" in
